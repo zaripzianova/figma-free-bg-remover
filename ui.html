@@ -1,0 +1,229 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: var(--figma-color-bg, #fff);
+    --bg2: var(--figma-color-bg-secondary, #f5f5f5);
+    --text: var(--figma-color-text, #1e1e1e);
+    --text2: var(--figma-color-text-secondary, #6b6b6b);
+    --border: var(--figma-color-border, #e6e6e6);
+    --brand: var(--figma-color-bg-brand, #0d99ff);
+    --on-brand: var(--figma-color-text-onbrand, #fff);
+    --danger: var(--figma-color-text-danger, #e03e1a);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font: 12px/1.45 Inter, system-ui, -apple-system, sans-serif;
+    display: flex; flex-direction: column; gap: 14px; height: 100vh;
+  }
+  h1 { font-size: 13px; font-weight: 600; margin: 0; }
+  .muted { color: var(--text2); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  select {
+    font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 6px;
+  }
+  button {
+    font: inherit; font-weight: 600; border: 0; border-radius: 6px; padding: 9px 12px;
+    background: var(--brand); color: var(--on-brand); cursor: pointer; width: 100%;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  .status { min-height: 52px; background: var(--bg2); border-radius: 8px; padding: 10px; }
+  .bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 8px; display: none; }
+  .bar > div { height: 100%; width: 0; background: var(--brand); transition: width .2s; }
+  .error { color: var(--danger); }
+  footer { margin-top: auto; font-size: 11px; }
+  a { color: var(--text2); }
+</style>
+</head>
+<body>
+  <div>
+    <h1 data-t="title"></h1>
+    <div class="muted" data-t="subtitle"></div>
+  </div>
+
+  <div class="row">
+    <span data-t="quality"></span>
+    <select id="model">
+      <option value="isnet_fp16" data-t="best"></option>
+      <option value="isnet_quint8" data-t="fast"></option>
+    </select>
+  </div>
+
+  <label><input type="checkbox" id="keep" checked /> <span data-t="keep"></span></label>
+
+  <button id="run" disabled></button>
+
+  <div class="status">
+    <div id="status" class="muted"></div>
+    <div class="bar" id="bar"><div id="barFill"></div></div>
+  </div>
+
+  <footer class="muted" data-t="footer"></footer>
+
+<script type="module">
+const LIB_URL = 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm';
+
+// ---------- i18n ----------
+const STR = {
+  en: {
+    title: 'Free Background Remover',
+    subtitle: 'Runs locally in Figma. Images never leave your computer.',
+    quality: 'Model',
+    fast: 'Light · 44 MB download',
+    best: 'Best quality · 88 MB',
+    keep: 'Keep original (create a copy)',
+    run1: 'Remove background',
+    runN: n => `Remove background (${n})`,
+    none: 'Select an image or a layer.',
+    selected: n => `Selected: ${n}`,
+    loadingLib: 'Loading…',
+    libError: 'Could not load the library. Check your internet connection.',
+    download: p => `Downloading the AI model (first run only)… ${p}%`,
+    working: (i, n) => n > 1 ? `Removing background ${i} of ${n}…` : 'Removing background…',
+    done: (ok, failed) => failed ? `Done: ${ok}. Failed: ${failed}.` : `Done ✓ (${ok})`,
+    footer: 'Open source · AGPL-3.0 · powered by @imgly/background-removal'
+  },
+  ru: {
+    title: 'Free Background Remover',
+    subtitle: 'Работает локально в Figma. Картинки никуда не отправляются.',
+    quality: 'Модель',
+    fast: 'Лёгкая · 44 МБ',
+    best: 'Лучшее качество · 88 МБ',
+    keep: 'Сохранить оригинал (сделать копию)',
+    run1: 'Удалить фон',
+    runN: n => `Удалить фон (${n})`,
+    none: 'Выдели картинку или слой.',
+    selected: n => `Выделено: ${n}`,
+    loadingLib: 'Загрузка…',
+    libError: 'Не удалось загрузить библиотеку. Проверь интернет.',
+    download: p => `Скачиваю модель (только при первом запуске)… ${p}%`,
+    working: (i, n) => n > 1 ? `Удаляю фон ${i} из ${n}…` : 'Удаляю фон…',
+    done: (ok, failed) => failed ? `Готово: ${ok}. Ошибок: ${failed}.` : `Готово ✓ (${ok})`,
+    footer: 'Открытый код · AGPL-3.0 · на базе @imgly/background-removal'
+  }
+};
+const T = (navigator.language || 'en').toLowerCase().startsWith('ru') ? STR.ru : STR.en;
+document.querySelectorAll('[data-t]').forEach(el => { el.textContent = T[el.dataset.t]; });
+
+// ---------- state & UI ----------
+const $ = id => document.getElementById(id);
+const runBtn = $('run'), statusEl = $('status'), bar = $('bar'), barFill = $('barFill');
+const modelSel = $('model'), keepBox = $('keep');
+let removeBackground = null;
+let selection = { total: 0 };
+let busy = false;
+
+const post = msg => parent.postMessage({ pluginMessage: msg }, '*');
+
+function setStatus(text, isError) {
+  statusEl.textContent = text;
+  statusEl.className = isError ? 'error' : 'muted';
+}
+function setProgress(p) {
+  if (p == null) { bar.style.display = 'none'; return; }
+  bar.style.display = 'block';
+  barFill.style.width = Math.round(p * 100) + '%';
+}
+function refresh() {
+  const n = selection.total;
+  runBtn.textContent = n > 1 ? T.runN(n) : T.run1;
+  runBtn.disabled = busy || n === 0;
+  if (!busy) setStatus(n === 0 ? T.none : T.selected(n));
+}
+
+function saveSettings() {
+  post({ type: 'save-settings', settings: { model: modelSel.value, keepOriginal: keepBox.checked } });
+}
+modelSel.onchange = saveSettings;
+keepBox.onchange = saveSettings;
+
+runBtn.onclick = async () => {
+  busy = true; refresh();
+  if (!removeBackground) {
+    setStatus(T.loadingLib);
+    try {
+      ({ removeBackground } = await import(LIB_URL));
+    } catch (e) {
+      console.error(e);
+      busy = false; refresh(); setStatus(T.libError, true);
+      return;
+    }
+  }
+  post({ type: 'run', keepOriginal: keepBox.checked });
+};
+
+// ---------- image processing ----------
+function mimeOf(b) {
+  if (b[0] === 0x89 && b[1] === 0x50) return 'image/png';
+  if (b[0] === 0xff && b[1] === 0xd8) return 'image/jpeg';
+  if (b[0] === 0x47 && b[1] === 0x49) return 'image/gif';
+  if (b[0] === 0x52 && b[1] === 0x49) return 'image/webp';
+  return 'image/png';
+}
+
+async function process(bytes) {
+  const downloads = {};
+  const config = {
+    model: modelSel.value,
+    device: 'cpu',
+    output: { format: 'image/png', type: 'foreground' },
+    progress: (key, current, total) => {
+      if (!total) return;
+      downloads[key] = [current, total];
+      let c = 0, t = 0;
+      for (const k in downloads) { c += downloads[k][0]; t += downloads[k][1]; }
+      if (c < t) { setStatus(T.download(Math.floor((c / t) * 100))); setProgress(c / t); }
+    }
+  };
+  const blob = new Blob([bytes], { type: mimeOf(bytes) });
+  const out = await removeBackground(blob, config);
+  return new Uint8Array(await out.arrayBuffer());
+}
+
+let stepInfo = { current: 1, total: 1 };
+
+window.onmessage = async (event) => {
+  const msg = event.data && event.data.pluginMessage;
+  if (!msg) return;
+
+  if (msg.type === 'settings') {
+    if (msg.settings.model) modelSel.value = msg.settings.model;
+    if (typeof msg.settings.keepOriginal === 'boolean') keepBox.checked = msg.settings.keepOriginal;
+  } else if (msg.type === 'selection') {
+    selection = msg.info; refresh();
+  } else if (msg.type === 'step') {
+    stepInfo = msg;
+    setStatus(T.working(msg.current, msg.total));
+    setProgress((msg.current - 1) / msg.total);
+  } else if (msg.type === 'process') {
+    try {
+      const result = await process(msg.bytes);
+      setStatus(T.working(stepInfo.current, stepInfo.total));
+      post({ type: 'result', id: msg.id, bytes: result });
+    } catch (e) {
+      console.error(e);
+      post({ type: 'error', id: msg.id, message: String((e && e.message) || e) });
+    }
+  } else if (msg.type === 'log') {
+    setStatus(msg.message, true);
+  } else if (msg.type === 'done') {
+    busy = false; setProgress(null); refresh();
+    if (msg.ok || msg.failed) setStatus(T.done(msg.ok, msg.failed), msg.failed > 0 && msg.ok === 0);
+    if (msg.ok) post({ type: 'notify', message: T.done(msg.ok, msg.failed) });
+  }
+};
+
+// expose for testing outside Figma
+window.__bgr = { process, load: async () => ({ removeBackground } = await import(LIB_URL)) };
+
+refresh();
+post({ type: 'ready' });
+</script>
+</body>
+</html>

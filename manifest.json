@@ -1,0 +1,13 @@
+{
+  "name": "Free Background Remover",
+  "id": "REPLACE_WITH_ID_FROM_FIGMA",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["https://cdn.jsdelivr.net", "https://staticimgly.com"],
+    "reasoning": "Downloads the open-source background removal library (jsdelivr) and its AI model (staticimgly.com) once; images are processed locally and never uploaded."
+  }
+}
